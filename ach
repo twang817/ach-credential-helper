@@ -3,8 +3,6 @@
 # careful, I use gnu everything on my mac
 # see https://www.topbug.net/blog/2013/04/14/install-and-use-gnu-command-line-tools-in-mac-os-x/
 
-TOP=$(cd $(dirname $(readlink -f ${BASH_SOURCE[0]}))/..; pwd)
-
 CACHE_DIR=${ACH_CACHE_DIR:-$HOME/.cache/ach}
 [ ! -d $CACHE_DIR ] && mkdir -p $CACHE_DIR
 LOCK=${ACH_LOCK_FILE:-$CACHE_DIR/lock}
@@ -74,6 +72,6 @@ ACCOUNT=${1:-$AWS_PROFILE}
         echo "Failed to obtain lock" >&2
         exit 1
     }
-    date 2>> $TOP/log 1>&2
-    main 2>> $TOP/log
+    date 2>> $CACHE_DIR/log 1>&2
+    main 2>> $CACHE_DIR/log
 ) 200>$LOCK
