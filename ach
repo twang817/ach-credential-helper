@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+
+# careful, I use gnu everything on my mac
+# see https://www.topbug.net/blog/2013/04/14/install-and-use-gnu-command-line-tools-in-mac-os-x/
+
+TOP=$(cd $(dirname $(readlink -f ${BASH_SOURCE[0]}))/..; pwd)
+
+CACHE_DIR=${ACH_CACHE_DIR:-$HOME/.cache/ach}
+[ ! -d $CACHE_DIR ] && mkdir -p $CACHE_DIR
+LOCK=${ACH_LOCK_FILE:-$CACHE_DIR/lock}
+
+cacheget() {
+    local file=$1
+    local timeout=$2
+    shift 2
+
+    if [ -f $file ]; then
+        local age=$(stat --format='%Y' $file)
+        local now=$(date +%s)
+        if (( age < (now - $timeout) )); then
+            rm $file
+        fi
+    fi
+    if [ ! -f $file ]; then
+        eval "$@ > $file"
+    fi
+}
+
+refreshaccounts() {
+    echo alks developer accounts -e >&2
+    alks developer accounts -e | awk '$2~/^[^-]*$/'
+}
+
+refreshcreds() {
+    local account_list=$CACHE_DIR/accounts
+    cacheget $account_list $((60 * 60 * 24)) refreshaccounts
+    source $account_list
+
+    alks_account=${ACCOUNT}_admin
+    if [ ! -v $alks_account ]; then
+        alks_account=${ACCOUNT}_labadmin
+    fi
+    if [ ! -v $alks_account ]; then
+        alks_account=${ACCOUNT}_security
+    fi
+    echo $alks_account >&2
+    echo alks session open -a -a ${!alks_account} -o aws >&2
+
+    local creds=$(alks sessions open -i -a "${!alks_account}" -o aws)
+    echo $creds | gpg --encrypt --armor -r $ACH_GPG_RECIPIENT
+}
+
+credout() {
+    if [ -t 1 ]; then
+        cat $1 | gpg --decrypt | jq -r
+    else
+        cat $1 | gpg --decrypt
+    fi
+}
+
+main() {
+    [ -z $ACCOUNT ] && {
+        echo error not account selected
+        exit 1
+    }
+    local credfile=$CACHE_DIR/$ACCOUNT.json.enc
+    cacheget $credfile $((60 * 60 * 12)) refreshcreds
+    credout $credfile
+}
+
+ACCOUNT=${1:-$AWS_PROFILE}
+(
+    flock -x -w 30 200 || {
+        echo "Failed to obtain lock" >&2
+        exit 1
+    }
+    date 2>> $TOP/log 1>&2
+    main 2>> $TOP/log
+) 200>$LOCK
