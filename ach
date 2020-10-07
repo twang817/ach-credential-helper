@@ -6,21 +6,53 @@
 CACHE_DIR=${ACH_CACHE_DIR:-$HOME/.cache/ach}
 [ ! -d $CACHE_DIR ] && mkdir -p $CACHE_DIR
 LOCK=${ACH_LOCK_FILE:-$CACHE_DIR/lock}
+CONTENTS=""
 
-cacheget() {
-    local file=$1
-    local timeout=$2
-    shift 2
+check_expiration() {
+    if [ -f $file ]; then
+        CONTENTS="$(credout $file)"
+        local expiration=$(date -d "$(echo $CONTENTS | jq -r '.Expiration' | sed 's/T/ /')" +%s)
+        local now=$(date +%s)
+
+        echo "check expiration, file: $file, expiration: $expiration, now: $now" >&2
+
+        if (( expiration < now )); then
+            echo "file too old, removing file $file" >&2
+            CONTENTS=""
+            rm $file
+        fi
+    fi
+}
+
+check_file_age() {
+    local timeout=$1
+    local file=$2
 
     if [ -f $file ]; then
         local age=$(stat --format='%Y' $file)
         local now=$(date +%s)
+
+        echo "check file age, file: $file (age: $age), timeout: $timeout, now: $now" >&2
+
         if (( age < (now - $timeout) )); then
+            echo "file too old, removing file $file" >&2
             rm $file
         fi
     fi
+}
+
+cacheget() {
+    local file=$1
+    local expiry_function=$2
+    shift 2
+
+    eval "$expiry_function $file"
+
     if [ ! -f $file ]; then
+        echo "cache miss, generating $file" >&2
         eval "$@ > $file"
+    else
+        echo "cache hit, retrieving $file" >&2
     fi
 }
 
@@ -31,7 +63,7 @@ refreshaccounts() {
 
 refreshcreds() {
     local account_list=$CACHE_DIR/accounts
-    cacheget $account_list $((60 * 60 * 24)) refreshaccounts
+    cacheget $account_list "check_file_age $((60 * 60 * 24))" refreshaccounts
     source $account_list
 
     alks_account=${ACCOUNT}_admin
@@ -49,10 +81,14 @@ refreshcreds() {
 }
 
 credout() {
+    if [ -z "$CONTENTS" ]; then
+        CONTENTS=$(cat $1 | gpg --decrypt)
+    fi
+
     if [ -t 1 ]; then
-        cat $1 | gpg --decrypt | jq -r
+        echo $CONTENTS | jq -r
     else
-        cat $1 | gpg --decrypt
+        echo $CONTENTS
     fi
 }
 
@@ -62,7 +98,7 @@ main() {
         exit 1
     }
     local credfile=$CACHE_DIR/$ACCOUNT.json.enc
-    cacheget $credfile $((60 * 60 * 12)) refreshcreds
+    cacheget $credfile check_expiration refreshcreds
     credout $credfile
 }
 
