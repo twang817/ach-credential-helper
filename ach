@@ -1,32 +1,11 @@
 #!/usr/bin/env bash
 
-# careful, I use gnu everything on my mac
+# I use gnu everything on my mac
 # see https://www.topbug.net/blog/2013/04/14/install-and-use-gnu-command-line-tools-in-mac-os-x/
 
-CACHE_DIR=${ACH_CACHE_DIR:-$HOME/.cache/ach}
-[ ! -d $CACHE_DIR ] && mkdir -p $CACHE_DIR
-LOCK=${ACH_LOCK_FILE:-$CACHE_DIR/lock}
-CONTENTS=""
-
-check_expiration() {
-    if [ -f $file ]; then
-        CONTENTS="$(credout $file)"
-        local expiration=$(date -d "$(echo $CONTENTS | jq -r '.Expiration' | sed 's/T/ /')" +%s)
-        local now=$(date +%s)
-
-        echo "check expiration, file: $file, expiration: $expiration, now: $now" >&2
-
-        if (( expiration < now )); then
-            echo "file too old, removing file $file" >&2
-            CONTENTS=""
-            rm $file
-        fi
-    fi
-}
-
-check_file_age() {
-    local timeout=$1
-    local file=$2
+rm_old_file() {
+    local file=$1
+    local timeout=$2
 
     if [ -f $file ]; then
         local age=$(stat --format='%Y' $file)
@@ -41,73 +20,106 @@ check_file_age() {
     fi
 }
 
-cacheget() {
-    local file=$1
-    local expiry_function=$2
-    shift 2
+fetch_account_list() {
+   echo "running: alks developer accounts -e" >&2
+   alks developer accounts -e > $account_file
+}
 
-    eval "$expiry_function $file"
 
-    if [ ! -f $file ]; then
-        echo "cache miss, generating $file" >&2
-        eval "$@ > $file"
-    else
-        echo "cache hit, retrieving $file" >&2
+ensure_account_list() {
+    rm_old_file "$account_file" $((60 * 60 * 24))
+    if [ ! -f $account_file -o ! -s $account_file ]; then
+        echo "$account_file missing or empty, refreshing" >&2
+        fetch_account_list
     fi
 }
 
-refreshaccounts() {
-    echo alks developer accounts -e >&2
-    alks developer accounts -e | awk '$2~/^[^-]*$/'
+rm_expired_creds() {
+    local file=$1
+
+    if [ -f $file ]; then
+        CREDS="$(credout $file)"
+        local expiration="$(echo $CREDS | jq -r '.Expiration')"
+        local expiration_ts=$(date -d "$expiration" +%s)
+        local now=$(date +%s)
+
+        echo "check expiration, file: $file, expiration: $expiration ($expiration_ts), now: $now" >&2
+
+        if (( expiration_ts < now )); then
+            echo "file too old, removing file $file" >&2
+            unset CREDS
+            rm $file
+        fi
+    fi
 }
 
-refreshcreds() {
-    local account_list=$CACHE_DIR/accounts
-    cacheget $account_list "check_file_age $((60 * 60 * 24))" refreshaccounts
-    source $account_list
+fetch_creds() {
+    ensure_account_list
+    echo "sourcing account file $account_file" >&2
+    source $account_file
 
     alks_account=${ACCOUNT}_admin
-    if [ ! -v $alks_account ]; then
+    if [ ! -v "$alks_account" ]; then
         alks_account=${ACCOUNT}_labadmin
     fi
-    if [ ! -v $alks_account ]; then
+    if [ ! -v "$alks_account" ]; then
         alks_account=${ACCOUNT}_security
     fi
-    echo $alks_account >&2
-    echo alks session open -a -a ${!alks_account} -o aws >&2
+
+    echo "selected account: $alks_account" >&2
+    echo "running: alks session open -a -a ${!alks_account} -o aws" >&2
 
     local creds=$(alks sessions open -i -a "${!alks_account}" -o aws)
-    echo $creds | gpg --encrypt --armor -r $ACH_GPG_RECIPIENT
+    if [ "$?" -eq 0 ]; then
+        echo $creds | gpg --encrypt --armor -r $ACH_GPG_RECIPIENT > $credfile 2> /dev/null
+    fi
+}
+
+ensure_creds() {
+    rm_expired_creds $credfile
+    if [ ! -f $credfile -o ! -s $credfile ]; then
+        echo "$credfile missing or empty, refreshing credentials" >&2
+        fetch_creds
+    fi
 }
 
 credout() {
-    if [ -z "$CONTENTS" ]; then
-        CONTENTS=$(cat $1 | gpg --decrypt)
+    if [ ! -v CREDS ]; then
+        echo "fetching creds from $1" >&2
+        CREDS=$(cat $1 | gpg --decrypt 2>/dev/null)
     fi
 
     if [ -t 1 ]; then
-        echo $CONTENTS | jq -r
+        echo $CREDS | jq -r
     else
-        echo $CONTENTS
+        echo $CREDS
     fi
 }
 
 main() {
     [ -z $ACCOUNT ] && {
-        echo error not account selected
+        echo "error: no account selected"
         exit 1
     }
+    # NOTE: in bash, local are available inside the function being called (yes, i know...)
+    local account_file=$CACHE_DIR/accounts
     local credfile=$CACHE_DIR/$ACCOUNT.json.enc
-    cacheget $credfile check_expiration refreshcreds
+    ensure_creds
     credout $credfile
 }
 
+CACHE_DIR=${ACH_CACHE_DIR:-$HOME/.cache/ach}
+[ ! -d $CACHE_DIR ] && mkdir -p $CACHE_DIR
+LOCK=${ACH_LOCK_FILE:-$CACHE_DIR/lock}
+
 ACCOUNT=${1:-$AWS_PROFILE}
+
 (
+    echo "--------------- $(date) ----------------" >> $CACHE_DIR/log
     flock -x -w 30 200 || {
-        echo "Failed to obtain lock" >&2
+        echo "Failed to obtain lock" 1>&2
         exit 1
     }
-    date 2>> $CACHE_DIR/log 1>&2
     main 2>> $CACHE_DIR/log
+    echo >> $CACHE_DIR/log
 ) 200>$LOCK
