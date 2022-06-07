@@ -67,7 +67,7 @@ fetch_creds() {
     fi
 
     echo "selected account: $alks_account" >&2
-    echo "running: alks session open -a -a ${!alks_account} -o aws" >&2
+    echo "running: alks sessions open -i -a ${!alks_account} -o aws" >&2
 
     local creds=$(alks sessions open -i -a "${!alks_account}" -o aws)
     if [ "$?" -eq 0 ]; then
